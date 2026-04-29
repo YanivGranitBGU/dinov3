@@ -63,7 +63,7 @@ gram:
   loss_weight_schedule: null  # (dict): If not None, use a schedule for the loss weight instead of `loss_weight`
 train:
   batch_size_per_gpu: 64
-  dataset_path: ImageNet:split=TRAIN
+  dataset_path: UCRDelayEmbedding:root=/home/yanivgra/dinov3/dinov3/data/datasets/multivariate:split=TRAIN
   data_config: null
   output_dir: .
   saveckp_freq: 20
@@ -180,7 +180,12 @@ checkpointing:
   period: 3750
   max_to_keep: 3
   keep_every: 99999999999999999  # Save a checkpoint every N iterations, regardless of max_to_keep and period
-
+# lora:
+#   use_lora: false
+#   r: 16
+#   alpha: 32
+#   dropout: 0.1
+#   target_modules: ["qkv", "proj"]  # attention layers in ViT
 # Example of constant schedules with schedules v2
 # # schedules:
 # #   lr:

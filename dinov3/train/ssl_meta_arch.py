@@ -22,7 +22,7 @@ from dinov3.models import build_model_from_cfg
 from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
 from dinov3.utils import count_parameters
-
+from peft import LoraConfig, get_peft_model
 logger = logging.getLogger("dinov3")
 
 
@@ -54,6 +54,9 @@ class SSLMetaArch(nn.Module):
         gc.collect()
         gram_backbone, _ = build_model_from_cfg(cfg, only_teacher=True)
         logger.info(f"Number of parameters: {count_parameters(student_backbone)}")
+        if getattr(cfg, "lora", None) and cfg.lora.use_lora:
+            student_backbone = self.apply_lora(student_backbone)
+            teacher_backbone = self.apply_lora(teacher_backbone)
         student_model_dict["backbone"] = student_backbone
         teacher_model_dict["backbone"] = teacher_backbone
         gram_model_dict["backbone"] = gram_backbone
@@ -711,6 +714,7 @@ class SSLMetaArch(nn.Module):
         loss.backward()
 
     def update_ema(self, m):
+        use_lora = getattr(self.cfg, "lora", None) and self.cfg.lora.use_lora
         if self.ema_params_lists is None:
             student_param_list = []
             teacher_param_list = []
@@ -724,6 +728,7 @@ class SSLMetaArch(nn.Module):
         with torch.no_grad():
             torch._foreach_mul_(teacher_param_list, m)
             torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)
+
 
     def update_gram(self, m=0):
         if not self.has_gram_teacher:
@@ -818,3 +823,17 @@ class SSLMetaArch(nn.Module):
             catted = catted.narrow(dim=over_dim, start=0, length=global_batch_size)
 
         return catted.chunk(subgroup_size, dim=over_dim)[distributed.get_subgroup_rank()].clone()
+
+    def apply_lora(self, model: nn.Module) -> nn.Module:
+
+        cfg = self.cfg  
+        lora_cfg = LoraConfig(
+            r=cfg.lora.r,
+            lora_alpha=cfg.lora.alpha,
+            lora_dropout=cfg.lora.dropout,
+            target_modules=list(cfg.lora.target_modules),
+            bias="none",
+        )
+        model = get_peft_model(model, lora_cfg)
+        model.print_trainable_parameters()  # useful sanity check at startup
+        return model

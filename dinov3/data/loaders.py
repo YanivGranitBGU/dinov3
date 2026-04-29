@@ -7,6 +7,7 @@ import logging
 from enum import Enum
 from typing import Any, Callable, List, Optional, TypeVar
 
+from dinov3.data.datasets.multivariate.ucr_delay_embedding import UCRDelayEmbedding
 import torch
 from torch.utils.data import Sampler
 
@@ -72,6 +73,20 @@ def _parse_dataset_str(dataset_str: str):
         class_ = NYU
         if "split" in kwargs:
             kwargs["split"] = NYU.Split[kwargs["split"]]
+    elif name == "UCRDelayEmbedding":
+        class_ = UCRDelayEmbedding
+        if "split" in kwargs:
+            kwargs["split"] = UCRDelayEmbedding.Split[kwargs["split"]]
+        if "base_height" in kwargs:
+            kwargs["base_height"] = int(kwargs["base_height"])
+        if "base_width" in kwargs:
+            kwargs["base_width"] = int(kwargs["base_width"])
+        if "embed_ratio" in kwargs:
+            kwargs["embed_ratio"] = float(kwargs["embed_ratio"])
+        if "embed_lmin" in kwargs:
+            kwargs["embed_lmin"] = int(kwargs["embed_lmin"])
+        if "embed_lmax" in kwargs:
+            kwargs["embed_lmax"] = int(kwargs["embed_lmax"])
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 

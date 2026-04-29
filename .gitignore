@@ -18,3 +18,10 @@ dist/
 .vscode/
 dinov3/checkpoints/
 *.pth
+
+# ignore everything in multivariate
+dinov3/data/datasets/multivariate/*
+# but allow directory traversal
+!dinov3/data/datasets/multivariate/
+# keep all python scripts
+!dinov3/data/datasets/multivariate/*.py
