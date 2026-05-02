@@ -70,14 +70,14 @@ train:
   seed: 0
   num_workers: 10
   OFFICIAL_EPOCH_LENGTH: 1250
-  monitor_gradient_norm: false
+  monitor_gradient_norm: true
   chunk_schedule: []
   use_teacher_head: true
   learn_from_teacher_tokens: false
   centering: "sinkhorn_knopp" # or "sinkhorn_knopp"
   checkpointing: false
   checkpointing_full: false  # aggressive checkpointing
-  compile: true
+  compile: false
   cudagraphs: false
   sharded_eval_checkpoint: false
   cache_dataset: false
@@ -180,12 +180,12 @@ checkpointing:
   period: 3750
   max_to_keep: 3
   keep_every: 99999999999999999  # Save a checkpoint every N iterations, regardless of max_to_keep and period
-# lora:
-#   use_lora: false
-#   r: 16
-#   alpha: 32
-#   dropout: 0.1
-#   target_modules: ["qkv", "proj"]  # attention layers in ViT
+lora:
+  use_lora: true
+  r: 16
+  alpha: 32
+  dropout: 0.1
+  target_modules: ["qkv", "proj"]  # attention layers in ViT
 # Example of constant schedules with schedules v2
 # # schedules:
 # #   lr:
