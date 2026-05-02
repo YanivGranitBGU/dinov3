@@ -413,6 +413,7 @@ def do_train(cfg, model, resume=False):
             )
             + 1
         )
+    check_nan_parameters(model, stage_name="after_load_checkpoint")
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
     if cfg.multidistillation.enabled:
@@ -529,6 +530,7 @@ def do_train(cfg, model, resume=False):
             consecutive_nan_count = 0
         # Step optimizer
         optimizer.step()
+        model._current_iteration = it
         model.update_ema(mom)
 
         # [GRAM] Update gram teacher when using gram teacher and frequent updates
@@ -609,6 +611,7 @@ def main(argv=None):
     logger.info(f"Making meta arch {meta_arch.__name__}")
     with torch.device("meta"):
         model = meta_arch(cfg)
+    logger.info(f"Model before distributed:\n{model}")
     model.prepare_for_distributed_training()
     # Fill all values with `nans` so that we identify
     # non-initialized values
@@ -632,6 +635,25 @@ def main(argv=None):
         return do_test(cfg, model, f"manual_{iteration}")
     do_train(cfg, model, resume=not args.no_resume)
 
+def check_nan_parameters(model, stage_name: str):
+    """Check all model parameters for NaN values and log findings."""
+    nan_params = []
+    ok_params = []
+    
+    for name, param in model.named_parameters():
+        if param.isnan().any():
+            nan_count = param.isnan().sum().item()
+            total = param.numel()
+            nan_params.append((name, nan_count, total, param.shape))
+        else:
+            ok_params.append(name)
+    
+    if nan_params:
+        logger.warning(f"[{stage_name}] Found {len(nan_params)} parameters with NaN:")
+        for name, nan_count, total, shape in nan_params:
+            logger.warning(f"  NaN: {name} | shape={shape} | {nan_count}/{total} values are NaN")
+    else:
+        logger.info(f"[{stage_name}] All {len(ok_params)} parameters are NaN-free ✓")
 
 if __name__ == "__main__":
     main()

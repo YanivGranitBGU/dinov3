@@ -56,7 +56,6 @@ class SSLMetaArch(nn.Module):
         logger.info(f"Number of parameters: {count_parameters(student_backbone)}")
         if getattr(cfg, "lora", None) and cfg.lora.use_lora:
             student_backbone = self.apply_lora(student_backbone)
-            teacher_backbone = self.apply_lora(teacher_backbone)
         student_model_dict["backbone"] = student_backbone
         teacher_model_dict["backbone"] = teacher_backbone
         gram_model_dict["backbone"] = gram_backbone
@@ -263,6 +262,16 @@ class SSLMetaArch(nn.Module):
                 f"OPTIONS -- global crops GRAM teacher resize antialias: {cfg.gram.global_teacher_resize_antialias}"
             )
 
+        # LORA
+        if getattr(cfg, "lora", None) and cfg.lora.use_lora:
+            logger.info("OPTIONS -- LORA is enabled")
+            logger.info(f"OPTIONS -- LORA -- r: {cfg.lora.r}")
+            logger.info(f"OPTIONS -- LORA -- alpha: {cfg.lora.alpha}")
+            logger.info(f"OPTIONS -- LORA -- target_modules: {list(cfg.lora.target_modules)}")
+        else:
+            logger.info("OPTIONS -- LORA is disabled")
+        self._log_parameter_stats()
+
     def _setup_distillation(self):
         logger.info(f"Performing distillation from {self.cfg.distillation.full_cfg_path}")
 
@@ -303,11 +312,13 @@ class SSLMetaArch(nn.Module):
     def init_weights(self) -> None:
         # All weights are set to `nan` to ensure we initialize everything explicitly
         self.student.backbone.init_weights()
+        if getattr(self.cfg, "lora", None) and self.cfg.lora.use_lora:
+            self._init_lora_parameters()
         self.student.dino_head.init_weights()
         self.student.ibot_head.init_weights()
         self.dino_loss.init_weights()
         self.ibot_patch_loss.init_weights()
-        self.model_ema.load_state_dict(self.student.state_dict())
+        self._copy_student_to_ema()
         if self.has_gram_teacher:
             if self.gram_ckpt is not None:
                 logger.info(f"Loading pretrained weights from {self.gram_ckpt}")
@@ -337,7 +348,7 @@ class SSLMetaArch(nn.Module):
                 keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                 process_group=distributed.get_process_subgroup(),
             )
-            self.model_ema.load_state_dict(self.student.state_dict())
+            self._copy_student_to_ema()
         if self.cfg.distillation.enabled:
             if self.cfg.distillation.checkpoint_path != "ignore":
                 logger.info(f"Loading teacher to distil from : {self.cfg.distillation.checkpoint_path}")
@@ -714,21 +725,22 @@ class SSLMetaArch(nn.Module):
         loss.backward()
 
     def update_ema(self, m):
-        use_lora = getattr(self.cfg, "lora", None) and self.cfg.lora.use_lora
-        if self.ema_params_lists is None:
-            student_param_list = []
-            teacher_param_list = []
-            for k in self.student.keys():
-                for ms, mt in zip(self.student[k].parameters(), self.model_ema[k].parameters()):
-                    student_param_list += [ms]
-                    teacher_param_list += [mt]
-            self.ema_params_lists = (student_param_list, teacher_param_list)
+        if getattr(self.cfg, "lora", None) and self.cfg.lora.use_lora:
+            self._update_ema_lora(m, iteration=getattr(self, "_current_iteration", -1))
         else:
-            student_param_list, teacher_param_list = self.ema_params_lists
-        with torch.no_grad():
-            torch._foreach_mul_(teacher_param_list, m)
-            torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)
-
+            if self.ema_params_lists is None:
+                student_param_list = []
+                teacher_param_list = []
+                for k in self.student.keys():
+                    for ms, mt in zip(self.student[k].parameters(), self.model_ema[k].parameters()):
+                        student_param_list += [ms]
+                        teacher_param_list += [mt]
+                self.ema_params_lists = (student_param_list, teacher_param_list)
+            else:
+                student_param_list, teacher_param_list = self.ema_params_lists
+            with torch.no_grad():
+                torch._foreach_mul_(teacher_param_list, m)
+                torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)
 
     def update_gram(self, m=0):
         if not self.has_gram_teacher:
@@ -738,9 +750,20 @@ class SSLMetaArch(nn.Module):
             teacher_param_list = []
             gramteacher_param_list = []
             for k in self.gram_teacher.keys():
-                for mgt, mt in zip(self.gram_teacher[k].parameters(), self.teacher[k].parameters()):
-                    gramteacher_param_list += [mgt]
-                    teacher_param_list += [mt]
+                gt_params = dict(self.gram_teacher[k].named_parameters())
+                t_params = dict(self.teacher[k].named_parameters())
+                for name in gt_params:
+                    if name not in t_params:
+                        raise RuntimeError(
+                            f"Gram teacher param '{k}.{name}' not found in teacher"
+                        )
+                    if gt_params[name].shape != t_params[name].shape:
+                        raise RuntimeError(
+                            f"Shape mismatch for '{k}.{name}': "
+                            f"gram teacher {gt_params[name].shape} vs teacher {t_params[name].shape}"
+                        )
+                    gramteacher_param_list.append(gt_params[name])
+                    teacher_param_list.append(t_params[name])
             self.gram_params_lists = (gramteacher_param_list, teacher_param_list)
         else:
             gramteacher_param_list, teacher_param_list = self.gram_params_lists
@@ -837,3 +860,94 @@ class SSLMetaArch(nn.Module):
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()  # useful sanity check at startup
         return model
+
+    def _init_lora_parameters(self):
+        initialized = 0
+        for module in self.student.modules():
+            if not hasattr(module, "reset_lora_parameters"):
+                continue
+            if not hasattr(module, "lora_A"):
+                continue
+            for adapter_name in module.lora_A.keys():
+                module.reset_lora_parameters(adapter_name=adapter_name, init_lora_weights=True)
+                initialized += 1
+        logger.info("Initialized LoRA adapters for %d wrapped modules", initialized)
+    
+    def _log_parameter_stats(self):
+        for name, module in [("student", self.student), ("teacher", self.teacher)]:
+            total = sum(p.numel() for p in module.parameters())
+            trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            logger.info(f"OPTIONS -- {name.upper()} -- total params: {total:,}")
+            logger.info(f"OPTIONS -- {name.upper()} -- trainable params: {trainable:,}")
+            logger.info(f"OPTIONS -- {name.upper()} -- frozen params: {total - trainable:,}")
+
+    def _copy_student_to_ema(self):
+        if getattr(self.cfg, "lora", None) and self.cfg.lora.use_lora:
+            self.model_ema.load_state_dict(self._student_state_dict_for_ema())
+        else:
+            self.model_ema.load_state_dict(self.student.state_dict())
+
+    def _student_state_dict_for_ema(self):
+        student_state_dict = self.student.state_dict()
+        if not (getattr(self.cfg, "lora", None) and self.cfg.lora.use_lora):
+            return student_state_dict
+
+        # For the LoRA case, we need to merge the adapter weights into the base weights and convert to canonical parameter names before loading into the EMA teacher.
+        ema_state_dict = {}
+        for key, value in student_state_dict.items():
+            if ".lora_A." in key or ".lora_B." in key:
+                continue
+            if ".lora_embedding_" in key or ".lora_magnitude_vector" in key:
+                continue
+            key = key.replace("_checkpoint_wrapped_module.", "")
+            key = key.replace("backbone.base_model.model.", "backbone.")
+            key = key.replace(".base_layer.", ".")
+            ema_state_dict[key] = value
+        return ema_state_dict
+    
+    def _update_ema_lora(self, m, iteration=-1):
+        # LoRA case: merge the adapter into the student's base weights temporarily,
+        # then update the plain EMA teacher using canonical parameter names.
+        rank = distributed.get_rank()
+        logger.info(f"[Iter {iteration}, Rank {rank}] Updating EMA with LoRA merged into base weights and canonical names")
+        if self.ema_params_lists is None:
+            student_param_dict = {}
+            teacher_param_dict = dict(self.model_ema.named_parameters())
+
+            for name, student_param in self.student.named_parameters():
+                if ".lora_A." in name or ".lora_B." in name:
+                    continue
+                if ".lora_embedding_" in name or ".lora_magnitude_vector" in name:
+                    continue
+                canonical_name = name.replace("_checkpoint_wrapped_module.", "")
+                canonical_name = canonical_name.replace("backbone.base_model.model.", "backbone.")
+                canonical_name = canonical_name.replace(".base_layer.", ".")
+                if canonical_name not in teacher_param_dict:
+                    raise RuntimeError(
+                        f"Parameter '{canonical_name}' not found in EMA teacher while building LoRA EMA lists"
+                    )
+                teacher_param = teacher_param_dict[canonical_name]
+                if teacher_param.shape != student_param.shape:
+                    raise RuntimeError(
+                        f"Shape mismatch for '{canonical_name}': student {student_param.shape} vs teacher {teacher_param.shape}"
+                    )
+                student_param_dict[canonical_name] = student_param
+            self.ema_params_lists = (
+                [student_param_dict[name] for name in student_param_dict],
+                [teacher_param_dict[name] for name in student_param_dict],
+            )
+
+        student_param_list, teacher_param_list = self.ema_params_lists
+        with torch.no_grad():
+            for k in self.student.keys():
+                s_module = self.student[k]
+                if hasattr(s_module, "merge_adapter"):
+                    s_module.merge_adapter()
+            try:
+                torch._foreach_mul_(teacher_param_list, m)
+                torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)
+            finally:
+                for k in self.student.keys():
+                    s_module = self.student[k]
+                    if hasattr(s_module, "unmerge_adapter"):
+                        s_module.unmerge_adapter()

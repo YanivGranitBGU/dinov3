@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import register_fsdp_forward_method
 from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
 from torch.utils.checkpoint import create_selective_checkpoint_contexts
-
+from peft import PeftModel
 from dinov3.utils import utils
 
 
@@ -154,6 +154,11 @@ def ac_compile_parallelize(
             activation_checkpointing_fn=activation_checkpoint_convnext,
         ),
         DinoVisionTransformer: dict(
+            compile_fn=compile_transformer,
+            fsdp_fn=fsdp_transformer,
+            activation_checkpointing_fn=activation_checkpoint_transformer,
+        ),
+        PeftModel: dict(
             compile_fn=compile_transformer,
             fsdp_fn=fsdp_transformer,
             activation_checkpointing_fn=activation_checkpoint_transformer,

@@ -14,8 +14,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import register_fsdp_forward_method
 from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
 from torch.utils.checkpoint import create_selective_checkpoint_contexts
-
-logger = logging.getLogger("dinov3")
+from peft import PeftModel
 
 
 def map_modules_and_blocks(models: list[nn.Module], callable) -> None:
